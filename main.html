@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<meta charset='utf-8'>
+<script type='text/javascript' src='https://code.jquery.com/jquery-1.12.1.js'></script>
+<style>
+  .rel  { position:relative }
+  .abs  { position:absolute; }
+  .pick { color:green; }
+  .hid  { opacity:0; }
+  .shw  { opacity:1; }
+  .on   { stroke:green; fill:green; style:"fill:green"; opacity:1; }
+</style>
+<svg  xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="850" height="300">
+  <svg id='g1'  viewBox="-5 0 850 300"  width="850" height="300"></svg>
+  <svg id='g2'  viewBox="-5 0 850 300"  width="850" height="300"></svg>
+</svg>
+<div id='NSlabel'> lower: N S upper:S N</div>
+<div id='panelChooser'></div>
+<pre>
+mode:         defineTrack wireUp simulate operate_no_ctc operate_w/ctc ctc
+              ctcPreview  noCTC
+seg_state   
+ wired-color                x
+ main-width      x          x      x          x             x          X
+ short-color     x 
+ abs-dash        x
+ dupl-border     x                            x             x
+ occupied-color                    x          x             x          x
+ path-color                                   ?             x          x
+node/turnout
+ wired                      x
+ position                          x          x             x          x
+ disabled                                                   x
+
+file:///Users/johnslater/myWebBasedComputer/users/johngslater/trains/signaling/src/v1.html
+tbd:
+ mod panelLz to include orientation -> lz,orientation  rot180 should update this prop, mod get()
+ ctc should look at level orientation and mod panel orientation where necessary  EEEE
+ rotate upper track for ctc view   [].reverse  EEEE takes care of the rest
+ ctc2 needs 2 orientation labels
+ correct mp la cross
+ nudge where possible
+ formalize positioning logic of panels in ctc view, calc panel width and do an offset
+ search for and kill duplicate segs
+ rewrite get()
+ formalize positioning logic of panels in ctc view, calc panel width and do an offset
+
+
+
+  properties:
+   panel: ns   ctc:  ns-ns sn-sn ns-sn  sn-ns     name the ns lists as upper&lower
+   seg:   added segs use main/secondary but guess short,apd/abs, and are not duplicated
+      main/secondary   // width, TF
+      short,apd/abs,duplicatedTrackWhichDisappersInOpCTC,  // color,dash,dualLine TF
+      delete   // darkens, lightens the other controls
+   node:  signal locks detected/blockControlPt
+      turnout: detected,signaled             // gray/black  signalIcon
+      ptAlongALine: blockControlPt signaled, // gray/black  signalIcon
+
+  std panel defines abs but not shown in operation mode if no detectedSwitch
+
+ mark points from adjacent panel
+ markSpurs add corner logic 
+ menloPark/laCross   sRockford/Rockford   matchups
+  
+ h/w is operated by a pi4 panel or the ctc sending mqtt to the panel
+ master computer can suspend operating when dcc is off
+ prevent defineTrack wireUp if any panels are operating
+ only operate when master computer gives permission
+----
+upper=[panelName,..],lower=[ibid], panel is upper or lower
+nz0                 { id:[x,y], .. } 
+nz={};
+$.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280],d); }
+lz=panelLz[panel]  [n1,n2,type]  // type is 0 main 1 std 2 side
+
+
+</pre>
+<!-- util -->
+<script>
+// sep 12-19 2020 user/johngslater/trains/signaling/train5grid.html wbmra
+
+const mid      =(n1,n2,wt=0.5)=> [wt*n1[0]+(1-wt)*n2[0],wt*n1[1]+(1-wt)*n2[1]];
+const length   =(v)=> Math.sqrt(v[0]*v[0]+v[1]*v[1]);
+const normalize=(v,__,len=length(v))=> [v[0]/len,v[1]/len];
+const dot      =(vec1,vec2)=> vec1[0]*vec2[0]+vec1[1]*vec2[1];
+const xPrd     =(vec1,vec2,__,v1=normalize(vec1),v2=normalize(vec2))=> v1[0]*v2[1]-v1[1]*v2[0];
+const vec      =(n1,n2)=> [n2[0]-n1[0],n2[1]-n1[1]];
+const vec1     =(n1,n2)=>normalize(vec(n1,n2));
+const scale    =(vec,len=1)=> [len*vec[0],len*vec[1]];
+const vecadd   =(n,vec)=> [n[0]+vec[0],n[1]+vec[1]];
+const rot90    =(vec)=> [-vec[1],vec[0]];
+const label=($g,pt,dAng,name,__,txtNode=$(SVGnode('text')),vec,len,ang)=>{
+  $g.append(txtNode
+    .attr({  class:'nodeLabel', x:pt[0], y:pt[1],dy:".3em","text-anchor":"middle",
+            "font-size":"12",stroke:"black","stroke-width":"1px" })
+    .html(name)
+  );
+  return txtNode;
+};
+const txform=(scale,translate)=> (pt)=> $.map([0,1],(i)=> pt[i]*scale[i]+translate[i] );
+let ptOnLine=(pt1,pt2,pt,t=0.1)=>{ // stackoverflow.com/questions/7050186/find-if-point-lays-on-line-segment
+  // check slopes match   (pt2.y-pt1.y)/(pt2.x-pt1.x) == (pt.y-pt1.y)/(pt.x-pt1.x)
+  // (pt2.y-pt1.y)*(pt.x-pt1.x) - (pt.y-pt1.y)*(pt2.x-pt1.x) = 0
+  // (pt.y-pt1.y)*(pt2.x-pt1.x) - (pt2.y-pt1.y)*(pt.x-pt1.x) = 0
+  // (pt2.x-pt1.x)*(pt.y-pt1.y) - (pt2.y-pt1.y)*(pt.x-pt1.x) = 0  
+  if(Math.abs((pt2[0]-pt1[0])*(pt[1]-pt1[1])-(pt2[1]-pt1[1])*(pt[0]-pt1[0]))>t){ 
+    return false;  // slopes dont match
+  }
+  if(Math.abs(pt2[0]-pt1[0])>t){  // not a vert line, 
+  // DDD
+    return (pt1[0]<pt2[0])  // is pt.x between a.x & b.x 
+      ? ((pt1[0]-t)<pt[0] && pt[0]<(pt2[0]+t))
+      : ((pt2[0]-t)<pt[0] && pt[0]<(pt1[0]+t));
+  }
+  // DDD
+  return (pt1[1]<pt2[1])   // vert line, is pt.y between a.y  b.y
+    ? ((pt1[1]-t)<pt[1] && pt[1]<(pt2[1]+t))
+    : ((pt2[1]-t)<pt[1] && pt[1]<(pt1[1]+t));
+};
+</script>
+<!-- MODEL DATA nz,lz=panelLz[panel],panel,upper,lower -->
+<script>
+//JSON.stringify(panelLz)
+//JSON.parse
+//const pp=(obj)=> '{'+$.map(obj,(d,k)=> k+':['+d[0]+','+d[1]+'],').join('')+'}';
+let panel=null;  // GLOBAL
+const upper={ 
+  panels:['helix','sYupper','Indigo','Hyde','Furst','Elmwood','Mercer','Bishop','nYupper','topStaging'], 
+  orientation:'SN' 
+};
+const lower={
+  panels:['nYlower_Justice', 'MenloPark','laCross','Kimball','Noble','Pumice',
+    'nRockford','Rockford','sRockford','sYlower','botStaging'
+  ],
+  orientation:'NS'
+};
+// lower: N S upper:S N
+// 428:  $.map([upper.panels,lower.panels],(level,leveli0,__,leveli=leveli0+1,y0= -100*leveli)=>{
+// 496:$.map([{panels:upper.panels,levelName:'upper'},{panels:lower.panels,levelName:'lower'}],(d,k)=>{
+
+
+const nCol=20, nRow=12; 
+const mxCol=nCol-1, mxRow=nRow-1;
+const addr=(i,j)=> 100*j+i;  // method of Lz
+const addrGetCol=(nid)=> nid%100;
+const addrGetRow=(nid)=> Math.floor(nid/100);
+let nz0={};  // { id:[x,y], .. }  GLOBAL
+$.map([...Array(nCol).keys()],(x,i)=>
+   $.map([...Array(nRow).keys()],(y,j)=>{
+     nz0[addr(i,j)]=[x,y];  // j is the row
+   })
+);
+const nudge=(dCol,dRow=0,__,di=dCol,dj=dRow)=>{  // ie dx,dy
+  $.map(lz,(seg)=>{ 
+    $.map(seg.slice(0,2),(nid,k,__,i=addrGetCol(nid),j=addrGetRow(nid),ddi=di,ddj=dj)=>{ 
+      // nodes on perimeter are kept on the perimeter
+      // col
+      if(i==0     && di>0){ ddi=0;}
+      if(i==mxCol && di<0){ ddi=0;}
+      // row
+      if(j==0     && dj>0){ ddj=0;}
+      if(j==mxRow && dj<0){ ddj=0;}
+      // make the move
+       i+=ddi;j+=ddj;
+      // keep the nodes within the perimeter by capping the size of the move
+      if(i<0){ i=0; }
+      if(i>mxCol){ i=mxCol; }
+      if(j<0){ j=0; }
+      if(j>mxRow){ j=mxRow; }      
+      seg[k]=addr(i,j);
+    })
+  });
+  $('.segment').remove(); renderLz($g1,panel,nz,lz);
+};
+
+const perimeter=(nid,__,i=addrGetRow(nid),j=addrGetCol(nid))=>  (i==0 || i==nRow-1 || j==0 || j==nCol-1);
+const perimeterCorner=(nid,__,i=addrGetRow(nid),j=addrGetCol(nid))=>  
+  (i==0      && (j==0 || j==nCol-1))  || 
+  (i==nRow-1 && (j==0 || j==nCol-1))
+;
+const nidsEndingOnPerimeter=(lz,__,onBdry={})=>{
+  $.map(lz,(seg)=>{
+    $.map(seg.slice(0,2),(nid)=>{ 
+      if(perimeter(nid)){ onBdry[nid]=1; };  
+    })
+  });
+  return onBdry;
+};
+</script>
+<!-- lz data,  get() stringifies panelLz   -->
+<script>
+let panelLz=
+{"helix":[
+[219,217,0],[217,316,0],[316,314,0],[314,413,0],[700,702,0],[702,603,0],[603,605,0],[605,506,0],[506,509,0],[509,410,0],[410,413,0],
+[119,117,0],[117,216,0],[216,214,0],[214,313,0],[600,602,0],[602,503,0],[503,505,0],[505,406,0],[406,409,0],[409,310,0],[310,313,0]
+],
+"sYupper":[[605,805,1],[605,603,1],[1108,805,0],[805,603,0],[119,100,0],[605,407,1],[409,211,1],[407,409,1],[409,419,1],[211,200,0],[211,219,0],[603,502,0],[502,500,0]],"nYlower_Justice":[[9,12,1],[12,113,1],[113,100,0],[113,116,0],[116,217,0],[217,218,0],[218,219,0],[217,209,0],[209,310,1],[310,317,1],[317,218,1],[416,317,1],[416,414,1],[414,412,1],[414,515,1],[515,516,1],[516,518,1],[516,617,1],[618,617,1],[407,306,1],[306,310,1],[404,305,1],[305,306,1],[404,304,1],[503,404,1],[703,503,1],[502,501,1],[200,205,0],[205,209,0],[304,205,1],[502,304,1],[703,501,0],[501,400,0],[703,1107,0],[407,408,1],[408,412,1],[509,511,1],[511,412,1],[509,408,1]],"Indigo":[[400,407,0],[605,407,1],[607,708,1],[708,709,1],[709,716,1],[709,810,1],[810,816,1],[601,605,1],[601,702,1],[702,706,1],[601,600,1],[407,308,0],[300,308,0],[308,319,0],[605,607,1],[607,616,1]],"Hyde":[[302,403,1],[605,504,1],[504,502,1],[601,605,1],[300,302,0],[606,605,1],[606,610,1],[606,408,1],[410,311,1],[302,311,0],[311,319,0],[410,412,1],[410,408,1],[408,403,1]],"MenloPark":[[205,7,1],[7,10,1],[10,111,1],[111,114,1],[10,15,1],[200,202,0],[202,303,0],[202,205,0],[205,219,0],[303,305,0],[305,406,1],[406,410,1],[305,319,0],[303,505,1],[614,715,1],[715,717,1],[614,619,1],[611,710,1],[611,614,1],[507,608,1],[608,611,1],[606,707,1],[707,710,1],[704,707,1],[605,504,1],[606,605,1],[703,604,1],[604,605,1],[601,604,1],[703,701,1],[501,504,1],[505,507,1],[507,519,1]],"laCross":[[403,504,1],[403,400,1],[500,504,1],[504,505,1],[505,208,1],[305,206,0],[200,206,0],[206,208,0],[208,219,0],[305,300,0],[608,507,1],[507,505,1],[611,608,1],[511,507,1]],"Furst":[[300,304,0],[304,405,0],[405,409,0],[405,403,1],[403,504,1],[403,401,1],[304,319,0],[409,419,0],[805,706,1],[803,805,1],[705,604,1],[602,604,1],[701,705,1],[705,706,1],[708,609,1],[609,510,1],[510,411,1],[708,711,1],[609,612,1],[504,510,1],[708,706,1]],"Kimball":[[1,4,1],[4,105,1],[105,106,1],[106,207,1],[207,208,1],[208,309,1],[105,101,1],[207,202,1],[306,407,0],[306,300,0],[306,309,0],[309,319,0],[408,509,1],[509,512,1],[512,613,1],[613,615,1],[515,512,1],[407,408,0],[408,419,0]],"Elmwood":[[400,402,0],[402,303,0],[300,303,0],[303,304,0],[304,506,1],[506,510,1],[409,308,0],[304,308,0],[308,319,0],[409,419,0]],"Noble":[[302,504,1],[304,405,1],[405,408,1],[408,307,1],[307,306,1],[200,207,0],[207,306,0],[306,304,0],[304,302,0],[300,302,0],[207,219,0],[504,510,1],[510,611,1],[611,614,1],[408,414,1],[307,314,1],[613,611,1],[609,611,1],[807,609,1],[609,607,1],[607,706,1],[807,804,1],[706,703,1],[607,602,1]],"Pumice":[[102,105,1],[1,4,1],[4,105,1],[105,106,1],[106,207,1],[203,304,1],[304,305,1],[305,404,1],[404,402,1],[404,503,1],[503,501,1],[203,200,0],[305,308,1],[308,409,1],[409,410,1],[410,511,1],[511,513,1],[413,410,1],[308,310,1],[310,211,1],[203,207,0],[207,211,0],[211,219,0]],"Mercer":[[400,401,0],[403,302,0],[302,300,0],[302,319,0],[401,805,1],[805,806,1],[806,907,1],[805,1007,1],[1007,1008,1],[1008,1109,1],[1109,1111,1],[1008,1011,1],[1011,912,1],[912,907,1],[1011,1012,1],[1012,913,1],[913,916,1],[916,1015,1],[1015,1012,1],[916,917,1],[913,814,1],[814,817,1],[814,715,1],[715,718,1],[715,616,1],[616,618,1],[912,813,1],[813,806,1],[813,714,1],[714,709,1],[714,615,1],[615,608,1],[615,516,1],[516,507,1],[516,417,1],[401,403,0],[403,417,0],[417,419,0],[918,818,1],[819,818,1],[919,819,1],[918,919,1]],"nRockford":[[301,303,1],[303,404,1],[404,401,1],[404,505,1],[505,501,1],[505,507,1],[507,204,1],[509,408,1],[507,709,1],[709,711,1],[711,612,1],[612,619,1],[711,719,1],[709,810,1],[810,819,1],[509,507,1],[509,519,1],[419,408,1],[408,307,1],[307,319,1],[307,206,1],[200,204,0],[204,206,0],[206,219,0]],"Bishop":[[400,401,0],[401,502,1],[401,403,0],[403,302,0],[300,302,0],[403,405,0],[302,306,0],[306,405,0],[306,319,0],[502,506,1],[405,407,1],[407,508,1],[508,510,1],[407,410,1]],"Rockford":[[403,304,1],[403,400,1],[306,207,1],[307,206,1],[209,110,1],[300,304,1],[304,306,1],[306,307,1],[307,319,1],[209,219,1],[209,207,1],[207,206,1],[206,200,1],[100,110,0],[110,119,0],[902,803,1],[902,919,1],[803,819,1],[902,900,1],[803,704,1],[704,719,1],[619,605,1],[704,605,1],[605,506,1],[506,500,1],[506,519,1],[1101,1103,1],[1103,1004,1],[1000,1004,1],[1105,1107,1],[1107,1008,1],[1008,1004,1],[1008,1010,1],[1010,1111,1],[1111,1113,1],[1010,1019,1]],"sRockford":[[202,303,1],[303,300,1],[1000,1002,1],[1002,903,1],[903,900,1],[903,804,1],[804,800,1],[1002,1004,1],[1004,905,1],[905,806,1],[806,707,1],[707,608,1],[608,614,1],[707,714,1],[806,812,1],[905,912,1],[1004,1012,1],[804,705,1],[705,700,1],[705,606,1],[606,600,1],[606,507,1],[507,505,1],[505,307,1],[507,309,1],[307,309,1],[309,315,1],[505,500,1],[303,307,1],[307,208,1],[208,210,1],[309,210,1],[210,111,1],[111,100,0],[111,119,0],[202,200,1]],"nYupper":[[300,302,0],[302,203,1],[203,204,1],[204,105,1],[105,107,1],[204,208,1],[302,306,0],[306,608,1],[608,310,1],[306,310,0],[310,319,0],[608,1108,1]],"sYlower":[[1108,408,1],[408,110,1],[408,307,1],[307,105,1],[307,1107,1],[100,105,0],[105,110,0],[110,119,0]],"topStaging":[[218,217,1],[103,104,1],[104,205,1],[217,116,1],[116,118,1],[104,106,1],[106,7,1],[7,12,1],[205,217,1],[106,116,1],[103,305,1],[305,318,1],[305,406,1],[406,507,1],[507,608,1],[608,709,1],[709,718,1],[618,608,1],[507,518,1],[418,406,1],[709,911,1],[911,918,1],[103,101,1],[101,100,0],[911,910,1],[910,809,1],[809,708,1],[708,607,1],[607,506,1],[506,405,1],[405,401,1],[506,501,1],[607,601,1],[708,701,1],[809,801,1],[910,901,1]],"botStaging":[[218,217,1],[103,104,1],[104,205,1],[217,116,1],[116,118,1],[104,106,1],[106,7,1],[7,12,1],[205,217,1],[106,116,1],[103,305,1],[305,318,1],[305,406,1],[406,507,1],[507,608,1],[608,709,1],[709,718,1],[618,608,1],[507,518,1],[418,406,1],[709,911,1],[911,918,1],[103,101,1],[101,100,0],[911,910,1],[910,809,1],[809,708,1],[708,607,1],[607,506,1],[506,405,1],[405,401,1],[506,501,1],[607,601,1],[708,701,1],[809,801,1],[910,901,1]]
+}
+;
+let o={};
+$.map(panelLz,(segs,panelName,__,)=>{ 
+  o[panelName]=$.map(segs,(seg)=> 
+    ({ nids:[seg[0],seg[1]], main:seg[2]==0, })
+  );
+});
+panelLz=o;
+const rotAddr180=(k,mxRow,mxCol,__,i=addrGetCol(k),j=addrGetRow(k))=> addr(mxCol-i,mxRow-j);
+let rotLz180=(lz)=>{
+  $.map(lz,(o,k,__,d=o.nids)=>{ 
+    lz[k].nids=[rotAddr180(d[0],mxRow,mxCol),rotAddr180(d[1],mxRow,mxCol),d[2]]; 
+  }); 
+  $('.segment').remove(); renderLz(renderLz($g1,panel,nz,lz));
+};
+
+const get=()=> JSON.stringify(panelLz);
+</script>
+<!-- model's dependent or calculated values,  turnouts  -->
+<script>
+// ptOnLine(pt1,pt2,pt,t=0.1)
+
+const lzWnid=(lz,nid)=> lz.filter((seg)=> seg.nids[0]==nid || seg.nids[1]==nid);
+const junctions=(lz,__,ct={})=>{
+  $.map(lz,(d)=>{
+    $.map(d.nids,(id,__,ct0=ct[id])=>{ ct[id]= ct0==null ? 1 : ct0+1; });
+  });
+  return ct;
+};
+const getTurnouts=(lz,__,cntz=junctions(lz),turnouts=[])=>{
+  $.map(cntz,(cnt,id)=>{ if(cnt==3){ turnouts.push(id); } });
+  return turnouts;
+};
+const getTurnoutsFKD=(lz,__,cntz=junctions(lz))=> cntz.filter((cnt,id)=> cnt==3);//cntz is obj,must be array
+let markSpurs=(panel,lz,__,jxnz=junctions(lz),cnt=0,removed={})=>{
+  let styleSpurSeg=(nid1,nid2)=>{
+    $('#line_'+panel+'_'+nid1+'_'+nid2).attr({stroke:'orange'});
+    $('#line_'+panel+'_'+nid2+'_'+nid1).attr({stroke:'orange'}); // dont know why I need
+  };
+  let removeSeg=(nid1,nid2)=>{ styleSpurSeg(nid1,nid2); removed[nid1+'_'+nid2]=1; cnt+=1; };//doesnt mutate lz
+  $.map(lz,(seg,__,nids=seg.nids)=>{
+    if(seg.main){ return; }   // keep all main segs
+    if(removed[nids[0]+'_'+nids[1]]!=undefined){ return; } // we've already eliminated the seg, probably at AAAA
+    // a spur may reach and run along the perimeter, 
+    // when reach perimeter the other logic assumes a seg hitting a perimeter is a thru line
+    // so we force the propagation of spur discovery here
+    if( !perimeter(nids[0]) && !perimeter(nids[1]) ){
+      if(jxnz[nids[0]]==1){ 
+        removeSeg(nids[0],nids[1]);
+       // let seg0=seg; 
+        if(jxnz[nids[1]]==2){ 
+          $.map(lzWnid(lz,nids[1]),(seg2)=>{ if(seg2!=seg){ removeSeg(seg2.nids[0],seg2.nids[1]); }}); 
+        }
+      }
+      if(jxnz[nids[1]]==1){ 
+        removeSeg(nids[0],nids[1]);
+      //  let seg0=seg;
+        if(jxnz[nids[0]]==2){ 
+          $.map(lzWnid(lz,nids[0]),(seg2)=>{ if(seg2!=seg){ removeSeg(seg2.nids[0],seg2.nids[1]); }}); 
+        }
+      }
+    }
+    if(
+      perimeter(nids[0]) && perimeter(nids[1])            // both on perimeter
+      && ( 
+        (addrGetCol(nids[0])==addrGetCol(nids[1])) ||     // on the same side
+        (addrGetRow(nids[0])==addrGetRow(nids[1]))   
+      )
+      && ( (jxnz[nids[0]]==1) || (jxnz[nids[1]]==1)  )    // an end is the end of a path
+    ){ // remove a seg lying on the perimeter and its adjacent seg
+    //console.log(panel,'remove seg lying on the perimeter',seg);//TBD >1 segs lie on perimeter  CCC
+      if(jxnz[nids[0]]==2){ $.map(lzWnid(lz,nids[0]),(seg2)=>{ if(seg2!=seg){ removeSeg(seg2.nids[0],seg2.nids[1]); }}); }
+      if(jxnz[nids[1]]==2){ $.map(lzWnid(lz,nids[1]),(seg2)=>{ if(seg2!=seg){ removeSeg(seg2.nids[0],seg2.nids[1]); }}); }
+      removeSeg(nids[0],nids[1]);
+    }
+  })
+  if(cnt>0){ 
+    markSpurs(panel,lz.filter((seg)=> !removed[seg.nids[0]+'_'+seg.nids[1]] )); 
+  }
+};
+ 
+</script>
+<!-- actions   build segs  del seg  // & call the rerendering -->
+<script>
+// ========================================================= MODEL building LOGIC
+// duplicated code being used as a ref
+let ptOnLine2=(pt1,pt2,pt,t=0.1)=>{ // stackoverflow.com/questions/7050186/find-if-point-lays-on-line-segment
+  // check slopes match   (pt2.y-pt1.y)/(pt2.x-pt1.x) == (pt.y-pt1.y)/(pt.x-pt1.x)
+  // (pt2.y-pt1.y)*(pt.x-pt1.x) - (pt.y-pt1.y)*(pt2.x-pt1.x) = 0
+  // (pt.y-pt1.y)*(pt2.x-pt1.x) - (pt2.y-pt1.y)*(pt.x-pt1.x) = 0
+  // (pt2.x-pt1.x)*(pt.y-pt1.y) - (pt2.y-pt1.y)*(pt.x-pt1.x) = 0  
+  if(Math.abs((pt2[0]-pt1[0])*(pt[1]-pt1[1])-(pt2[1]-pt1[1])*(pt[0]-pt1[0]))>t){ 
+    return false;  // slopes dont match
+  }
+  if(Math.abs(pt2[0]-pt1[0])>t){  // not a vert line, 
+  // DDD
+    return (pt1[0]<pt2[0])  // is pt.x between a.x & b.x 
+      ? ((pt1[0]-t)<pt[0] && pt[0]<(pt2[0]+t))
+      : ((pt2[0]-t)<pt[0] && pt[0]<(pt1[0]+t));
+  }
+  // DDD
+  return (pt1[1]<pt2[1])   // vert line, is pt.y between a.y  b.y
+    ? ((pt1[1]-t)<pt[1] && pt[1]<(pt2[1]+t))
+    : ((pt2[1]-t)<pt[1] && pt[1]<(pt1[1]+t));
+};
+
+// build segs
+let state=0;  // 0 main 1 std 2 side
+const setState=(neuState)=>{ state=neuState; };
+var buff=null;  // the 'first' click or a 2 click sequence
+// clickNode hardwired to buildSeg behavior - mutates lz obj
+let clickNode=(ev,__,id=parseInt($(ev.target).attr('class').split('_')[1]))=>{  
+  if(buff==null){                                            buff=id;               }
+  else          { 
+    if(id!=buff){
+      let removed1,removed2;
+      $.map(lz,(d,k,__,nids=d.nids)=>{ 
+        if(ptOnLine2(nz[nids[0]],nz[nids[1]],nz[buff],0.1)){ // large tol means don't split on an end
+          //clone1= {...d};  // not cloning clone1 is a pointer to d  zzzzzzzzz
+          let clone1=Object.assign({},d); clone1.nids=d.nids.slice(); clone1.nids[0]=buff; lz.push(clone1);
+          let clone2=Object.assign({},d); clone2.nids=d.nids.slice(); clone2.nids[1]=buff; lz.push(clone2);
+          removed1=k; // lz.splice(k,1);
+        }
+        if(ptOnLine2(nz[nids[0]],nz[nids[1]],nz[id  ],0.1)){ // large tol means don't split on an end 
+          let clone1=Object.assign({},d); clone1.nids=  d.nids.slice(); clone1.nids[0]=id; lz.push(clone1);
+          let clone2=Object.assign({},d); clone2.nids=  d.nids.slice(); clone2.nids[1]=id; lz.push(clone2);
+          removed2=k; // lz.splice(k,1);  // when both ends are on the line, this is wrong    zzzzz    
+        }
+      });
+      if(removed1!=undefined && removed2==undefined){ lz.splice(removed1,1); }
+      if(removed2!=undefined && removed1==undefined){ lz.splice(removed2,1); }   
+      if(removed2!=undefined && removed1!=undefined){ 
+        $.map([removed1,removed2].sort().reverse(),(k)=>{ lz.splice(k,1); }); 
+      }
+      lz.push({ nids:[buff,id], main:state==0 }); 
+    };    
+    buff=null; 
+    viewUpdate();
+  }  
+};
+// clickSeg hardwired to  del seg
+const clickSeg=(ev,lz2,__,obj=$(ev.target))=>{ // uses and mutates lz
+// zzz why must dbl click for clickSeg - mutates lz obj
+//obj.remove();   // this does not update model, and turnouts wont be updated
+ 
+  var endz=$.map(obj.attr('id').split('_').slice(2),(d)=> parseInt(d)); // kludge, 2 is a hardwire
+  var kMatch=null;
+  $.map(lz2,(d,k)=>{ 
+    if(((d.nids[0]==endz[0])||(d.nids[1]==endz[0])) && ((d.nids[0]==endz[1])||(d.nids[1]==endz[1])) ){ kMatch=k; }
+  }); 
+  if(kMatch!=null){ 
+    lz.splice(kMatch,1);  //mutates lz
+    $('.segment').remove();
+    renderLz($g1,panel,nz,lz);
+  } 
+};
+</script>
+<!-- view -->
+<script>
+const svgNS="http://www.w3.org/2000/svg", DIV='<div>';
+const SVGnode= (tag)=> document.createElementNS(svgNS,tag);
+const Line= ($g,id,klass,x1,y1,x2,y2,stroke,width,__,aLine=$(SVGnode('line')))=> {
+  $g.append(aLine
+    .attr({ id:'line_'+id,class:klass,x1:x1,y1:y1,x2:x2,y2:y2, 
+      stroke:stroke,"stroke-width":width, opacity:0.90 })
+  );
+  return aLine;
+};
+var $g1,$g2;  // dots,lines  GLOBAL
+// zzzz pass in nz
+const labelGrid=($g,tnz)=>{
+// zzz FKD, redoing the algorithm for creating the mesh
+  $.map([...Array(nCol).keys()],(x,i)=>
+     $.map([...Array(nRow).keys()],(y,j)=>{
+       let txt=tnz[100*j+i][1];  // should be a fn passed in
+       let n_ij=tnz[100*j+i];
+       label($g,[n_ij[0],-n_ij[1]],0,txt);
+     })
+  );
+};
+const renderControlPoints=(jxns)=>{  // css
+  $.map(jxns,(cnt,id)=>{ if(cnt>1){ $('.dot_'+id).css({fill:'blue'}).attr({r:{2:3,3:4}[cnt]}); } }); 
+};
+const renderTurnouts=(turnouts)=>{ // css
+  $.map(turnouts,(id,k)=>{ $('.dot_'+id).css({fill:'black'}).attr({r:4}); }); 
+};
+// zzzz reprogram zzzz
+const viewUpdate=()=>{  // called by clickNode after add a seg
+  $('.segment').remove(); renderLz($g1,panel,nz,lz); // zzz should be a call to view telling it what 
+};
+
+// sort seg node1_node2
+// panel seg 
+ids=$.map($('.segment'),(d)=> [$.map($(d).attr('id').split('_').slice(1),(s)=> parseInt(s)).sort((a,b)=> a-b)])
+ids2=ids.sort((a,b)=> b[0]-a[0])
+
+let nz={};  // ugly global set by setPanel // zzzzz
+///$.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280])(d); });  // wrong,  nz is nid not a crd
+let lz=[];  // [node1,node2,segType]  GLOBAL
+
+const renderNz=($g,nz,__)=>{ // VIEW
+  $.map(nz,(d,k)=> $g.append(
+    $(SVGnode('circle')).attr({ class:'dot dot_'+k,cx:d[0],cy:-d[1],r:2,style:"fill:silver;" })
+  ));
+  $.map(nz,(d,k)=> $g.append(  // hotspot
+    $(SVGnode('circle'))
+      .attr({ class:'node_'+k+' picker',r:8,opacity:0.1,style:"fill:yellow;",cx:d[0],cy:-d[1]})
+    //.click((ev)=> clickNode(ev,lz)) // only attaches event handler to lz of nYupper
+      .click((ev)=> clickNode(ev))
+  ));
+};
+const renderLz=($g,panelName,nz,lz,scaleFactor=1,__)=>{ // VIEW
+//$('.segment').remove(); 
+  $.map(lz,(d,k,__)=>{ 
+    Line($g ,[panelName,d.nids.sort().join('_')].join('_'),'segment',
+      nz[d.nids[0]][0],-nz[d.nids[0]][1],nz[d.nids[1]][0],-nz[d.nids[1]][1],
+      [d.main ? 'green':'green'],scaleFactor*[d.main ? 8:4]                     // zzz dev: color of mode pick
+    )
+    .click((ev,__)=> clickSeg(ev,lz))   // uses and mutates lz
+  });
+  $('.dot').css({fill:'silver'}).attr({r:2});
+  renderControlPoints(junctions(lz));
+  renderTurnouts(getTurnouts(lz));
+  nz={}; $.map(nz,(d,k)=> label($g,[d[0]+7,-d[1]-7],0,k)); 
+};
+// click callbacks
+const setPanel=(panel_,orientation)=>{
+  panel=panel_;  // make it global
+  nz={}; $.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280])(d); });
+  lz=panelLz[panel]; // mutate global
+  $('.segment').remove(); 
+  $('.dot').show();
+  $('.suffle').hide();
+  $('.blockInfo').hide();
+  $('.nodeLabel').hide();
+  renderLz($g1,panel,nz,lz);
+  $('#NSlabel').html(orientation);
+  buff=null; 
+};
+const renderCTC=()=>{ 
+  $('.segment').remove(); 
+  $('.dot').hide();
+  $('.suffle').show();
+  $('.blockInfo').show();
+  $('.nodeLabel').show();
+// zzz kludge assumes a panel have at least one seg
+  $.map([upper,lower],(level,leveli0,__,leveli=leveli0+1,y0= -100*leveli)=>{
+    console.log(level);
+    let minMainRowRt0=undefined;
+    $.map(level.panels,(obj,position,__)=>{
+      let p=obj;  // obj.panels;
+      let orientation=level.orientation;
+      let lz=panelLz[p];
+      let mnXi=lz[0].nids[0],mxXi=lz[0].nids[0],mnYi=lz[0].nids[1],mxYi=lz[0].nids[1];
+      $.map(lz,(d)=>{ 
+        $.map(d.nids,(nid,__,i=addrGetCol(nid),j=addrGetRow(nid))=>{
+          mnXi=Math.min(i,mnXi);
+          mxXi=Math.min(i,mxXi);
+          mnYi=Math.min(j,mnYi);
+          mxYi=Math.max(j,mxYi);
+        });
+      });
+      let minMainRowLt=100,minMainRowRt=100;
+      $.map(lz,(d)=>{ 
+        if(d.main){
+          $.map(d.nids,(nid,__,i=addrGetCol(nid),j=addrGetRow(nid))=>{
+            if(i==0    ){ if(j<minMainRowLt){ minMainRowLt=j; } }
+            if(i==mxCol){ if(j<minMainRowRt){ minMainRowRt=j; } }
+          });
+        }
+      });
+      let dY= -( (minMainRowRt0==undefined) ? 0 : (minMainRowLt-minMainRowRt0) );
+      let nz00={}; $.map(nz0,(d,k)=>{ nz00[k]=[d[0],d[1]+dY]; });
+      let nz={}; $.map(nz00,(d,k)=>{
+        nz[k]=txform([4,5],[0+position*75,y0])(d); 
+      }); 
+      
+  //    nz={}; $.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280])(d); }); 
+      
+      renderLz($g1,p,nz,panelLz[p],0.3);
+      markSpurs(p,lz);
+      label($g2,[0+position*75+35,100*leveli+20],0,p)
+        .click((e)=>{ setPanel(p,orientation); });
+      label($g2,[0+position*75+70,100*leveli+20],0,'abs 0').attr({ class:'blockInfo' })
+        .click((e)=>{ console.log('view of interStation track, ie ABS, tbd'); });
+      label($g2,[0+position*75+35,100*leveli+30],0,'< &nbsp;&nbsp;&nbsp;>').attr({ class:'suffle' });
+      label($g2,[0+position*75+35,100*leveli+30],0,'  x  ').attr({ class:'suffle' })
+        .attr({"font-size":"16",stroke:"red","stroke-width":"1px" });
+      label($g2,[0+position*75+70,100*leveli+30],0,'  +  ').attr({ class:'suffle' })
+        .attr({"font-size":"16",stroke:"green","stroke-width":"1px" })
+        .click((e)=>{
+          console.log('warning: adding a station will remove existing interstation track');
+        })
+      ;
+      minMainRowRt0=minMainRowRt+dY;
+    });
+  });
+
+  nz={}; $.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280])(d); });  // restore
+};
+</script>
+<!-- gui panels  setPanel  setState for adding segs -->
+<script>
+
+
+$("#panelChooser").append(
+  $('<span>')
+    .attr({'class':'panelOption',id:'CTC'})
+    .html('<b>CTC_layoutPreview</b> ')
+    .click((ev)=>{ $('.pick').removeClass('pick'); $(ev.target).addClass('pick'); renderCTC(); })
+)
+$("#panelChooser").append(
+  $('<span>')
+    .attr({'class':'panelOption',id:'CTC'})
+    .html(' <b>CTC</b>')
+    .click((ev)=>{ $('.pick').removeClass('pick'); $(ev.target).addClass('pick'); renderCTC(); })
+)
+
+
+$.map([{panels:upper,levelName:'upper'},{panels:lower,levelName:'lower'}],(d,k,__,
+    orientation=d.panels.orientation,foo='fool')=>{
+  $("#panelChooser").append($('<hr>'));
+  $("#panelChooser").append($('<span>').html('<b>'+d.levelName+'</b>: '));//orientation is it level or panelzzz
+//$.map(d.panels,(obj,k,__,d=obj.panel,oriention=obj.orientation)=> $("#panelChooser").append(
+  $.map(d.panels.panels,(panelName,k,__,)=> $("#panelChooser").append(
+    $('<span>').attr({'class':'panelOption',id:d}).html(panelName+' ')
+      .click((ev)=>{ 
+        $('.pick').removeClass('pick'); $(ev.target).addClass('pick');  
+        setPanel(panelName,orientation); 
+      })
+  ));
+  $("#panelChooser").append($('<hr>'));
+});
+
+const statePanel_render=($g)=>{
+  const copyEndpts=(l1,l2)=>{ l2.attr({ x1:l1.attr('x1'), y1:l1.attr('y1'), x2:l1.attr('x2'), y2:l1.attr('y2'), }); };    
+  let hilite=Line($g,'main','segType',150,295,225,295,'orange',12)
+    .click((ev)=>{ setState(0); });
+  let main  =Line($g,'main','segType',150,295,225,295,'green' , 8)
+    .click((ev)=>{ setState(0); copyEndpts(main,hilite);});
+  let std   =Line($g,'std' ,'segType',275,295,350,295,'green' , 4)
+    .click((ev)=>{ setState(1); copyEndpts(std ,hilite);});
+  let side  =Line($g,'side','segType',400,295,475,295,'gray'  , 4)
+    .click((ev)=>{ setState(2); copyEndpts(side,hilite);});
+};
+</script>
+<!-- init rendering (model already created) -->
+<script>
+$(document).ready((__)=>{ 
+  $g1=$('#g1');
+  $g2=$('#g2');
+  
+  nz={}; $.map(nz0,(d,k)=>{ nz[k]=txform([28,25],[0,-280])(d); });  // zzz kludge
+  renderNz($g2,nz);
+  
+  
+  $('#'+'nYupper').addClass('pick'); setPanel('nYupper','SN');
+  setTimeout(()=> $('.nodeLabel').hide(),3000);
+  statePanel_render($g2);
+  
+  $('#NSlabel').click((ev,__,ns={SN:'NS',NS:'SN'}[$('#NSlabel').html()])=>{
+    $('#NSlabel').html(ns);
+    rotLz180(lz);
+    // zzz 
+    console.log('tbd: rotate/mutate the lz property and obj.orientation');
+  });
+  
+});
+</script>
